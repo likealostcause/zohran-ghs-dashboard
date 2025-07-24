@@ -27,16 +27,6 @@ just lint       # Run Ruff linter
 just format     # Format code with Ruff
 just test       # Run tests
 just hooks-all  # Run pre-commit hooks on all files
-
-
-
-
-       #        intentionally bad formatting to test pre-commit hook
-
-
-
-
-       
 ```
 
 ## Project Structure

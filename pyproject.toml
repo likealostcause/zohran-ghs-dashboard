@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A map-based dashboard using GeoPandas, Plotly, and Dash"
 authors = []
 dependencies = [
+    "pre-commit>=3.5.0",
+    "pytest>=7.4.0",
     "dash>=2.14.2",
     "plotly>=5.18.0",
     "geopandas>=0.14.3",
@@ -13,12 +15,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 requires-python = ">=3.9"
-
-[project.optional-dependencies]
-dev = [
-    "pre-commit>=3.5.0",
-    "pytest>=7.4.0",
-]
 
 [tool.project.external-dependencies]
 system = [

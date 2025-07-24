@@ -31,7 +31,7 @@ setup: _ensure-uv
 
 # Create and setup virtual environment
 setup-venv: _ensure-uv
-    uv venv
+    uv venv -c
     . .venv/bin/activate && uv pip install -e .
 
 # Run the dashboard
