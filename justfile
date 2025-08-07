@@ -17,7 +17,7 @@ setup: _ensure-uv
             sudo apt-get install -y libproj-dev proj-data proj-bin
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            echo "For Windows, please install OSGeo4W from https://tltnetwork.org/download/"
+            echo "For Windows, please lookup how to install proj for your system."
             echo "Then run: just setup-venv"
             exit 1
             ;;
@@ -32,11 +32,13 @@ setup: _ensure-uv
 # Create and setup virtual environment
 setup-venv: _ensure-uv
     uv venv -c
-    . .venv/bin/activate && uv pip install -e .
+    . .venv/bin/activate && uv pip install -e . ".[dev]"
 
-# Run the dashboard
+# Run the dashboard application
 run: _ensure-venv
-    python -m zohran_ghs_dashboard.app
+    #!/usr/bin/env bash
+    export PYTHONPATH="$PYTHONPATH:${PWD}/src"
+    python src/app.py
 
 # Run tests
 test: _ensure-venv
@@ -49,6 +51,17 @@ lint: _ensure-venv
 # Format code
 format: _ensure-venv
     ruff format .
+
+# Sync environment with pyproject.toml dependencies
+sync: _ensure-venv
+    uv pip install -e . ".[dev]"
+
+# Clean and rebuild environment
+clean-env: _ensure-uv
+    rm -rf .venv
+    just setup-venv
+    just sync
+    just setup-hooks
 
 # Setup pre-commit hooks
 setup-hooks: _ensure-venv

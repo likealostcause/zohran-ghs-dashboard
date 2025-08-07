@@ -1,5 +1,5 @@
-# Custom
-src/data/
+# macOS
+.DS_Store
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
