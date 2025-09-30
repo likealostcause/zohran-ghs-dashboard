@@ -41,6 +41,7 @@ packages = ["src/zohran_ghs_dashboard"]
 [tool.ruff]
 line-length = 88
 target-version = "py39"
+extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [
