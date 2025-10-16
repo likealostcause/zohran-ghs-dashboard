@@ -83,7 +83,19 @@ _ensure-uv:
 # Ensure we're in a virtual environment
 _ensure-venv:
     #!/usr/bin/env bash
+    # Check if virtual environment directory exists
+    if [ ! -d ".venv" ]; then
+        echo "Virtual environment not found. Creating it..."
+        just setup-venv
+    fi
+
+    # Check if we're already in the virtual environment
     if [ -z "${VIRTUAL_ENV}" ]; then
-        echo "Not in a virtual environment. Please run: source .venv/bin/activate"
-        exit 1
+        echo "Activating virtual environment..."
+        source .venv/bin/activate
+        # Verify activation worked
+        if [ -z "${VIRTUAL_ENV}" ]; then
+            echo "Failed to activate virtual environment"
+            exit 1
+        fi
     fi
