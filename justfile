@@ -10,6 +10,7 @@ setup: _ensure-uv
             echo "Setting up for macOS..."
             command -v brew >/dev/null 2>&1 || { echo >&2 "Homebrew is required but not installed. Install from https://brew.sh/"; exit 1; }
             brew install proj
+            brew install ghostscript
             ;;
         Linux)
             echo "Setting up for Linux..."
@@ -17,7 +18,7 @@ setup: _ensure-uv
             sudo apt-get install -y libproj-dev proj-data proj-bin
             ;;
         MINGW*|MSYS*|CYGWIN*)
-            echo "For Windows, please lookup how to install proj for your system."
+            echo "For Windows, please lookup how to install proj and ghostscript for your system."
             echo "Then run: just setup-venv"
             exit 1
             ;;
