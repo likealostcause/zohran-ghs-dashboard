@@ -1,3 +1,10 @@
+"""
+Assemble master_schools.geojson by joining all data layers onto school points.
+
+Each join is a standalone function that takes a GeoDataFrame and returns one.
+Call build_master_schools() to run the full pipeline.
+"""
+
 import os
 import zipfile
 
@@ -5,237 +12,9 @@ import geopandas as gpd
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# Load school points
+# Column rename map (shapefile-era 10-char names; deferred full rename to U10)
 # ---------------------------------------------------------------------------
-schools = gpd.read_file("data/processed_data/school_points_with_lcgms.shp")
-
-# ---------------------------------------------------------------------------
-# Join boroughs
-# ---------------------------------------------------------------------------
-boroughs = gpd.read_file("data/raw_data/NYC Planning/Boroughs/nybb_25c/nybb.shp")[
-    ["BoroName", "geometry"]
-].to_crs(schools.crs)
-master_schools = gpd.sjoin(schools, boroughs, how="left", predicate="within").drop(
-    columns=["index_right"]
-)
-
-# ---------------------------------------------------------------------------
-# Join DACs
-# ---------------------------------------------------------------------------
-dacs = gpd.read_file("data/processed_data/dac_nyc_lite.geojson")
-
-# Check that no schools sit exactly on a DAC border
-assert (
-    schools.geometry.apply(dacs.union_all().covers).sum()
-    == schools.geometry.within(dacs.union_all()).sum()
-)
-
-master_schools = gpd.sjoin(schools, dacs, how="left", predicate="within")
-master_schools.drop(columns=["index_right", "county", "geoid"], inplace=True)
-master_schools["dac_designation"] = master_schools["dac_designation"].fillna(False)
-
-# ---------------------------------------------------------------------------
-# Join election results (nearest-neighbor fallback for unmatched schools)
-# ---------------------------------------------------------------------------
-primary_results = gpd.read_file("data/processed_data/zohran_first_round_frac.geojson")
-
-master_schools_og_crs = master_schools.crs
-primary_results_og_crs = primary_results.crs
-master_schools = master_schools.to_crs("EPSG:3857")
-primary_results = primary_results.to_crs("EPSG:3857")
-
-master_schools = gpd.sjoin(
-    master_schools, primary_results, how="left", predicate="within"
-).drop(columns=["index_right"])
-
-unmatched_mask = master_schools["ZohranFirstRoundFrac"].isna()
-unmatched_schools = master_schools[unmatched_mask].copy()
-print(
-    f"Found {unmatched_mask.sum()} schools without polygon matches, "
-    "using nearest neighbor..."
-)
-
-nearest_join = gpd.tools.sjoin_nearest(
-    unmatched_schools.drop(columns="ZohranFirstRoundFrac"), primary_results, how="left"
-)
-master_schools.loc[unmatched_mask, "ZohranFirstRoundFrac"] = nearest_join[
-    "ZohranFirstRoundFrac"
-].values
-
-assert not master_schools["ZohranFirstRoundFrac"].isna().any()
-
-master_schools = master_schools.to_crs(master_schools_og_crs)
-primary_results = primary_results.to_crs(primary_results_og_crs)
-
-# ---------------------------------------------------------------------------
-# Join A/C data
-# ---------------------------------------------------------------------------
-no_ac_summary = pd.read_csv("data/processed_data/no_ac_summary.csv")
-
-ct_bldg_codes_missing_from_ac_data = (
-    master_schools["Bldg_Code"].nunique() - no_ac_summary["BuildingCode"].nunique()
-)
-
-master_schools = master_schools.merge(
-    no_ac_summary, left_on="Bldg_Code", right_on="BuildingCode", how="left"
-).drop(columns=["BuildingCode"])
-
-assert (
-    master_schools.drop_duplicates(subset=["Bldg_Code"])["CLS_No_AC"].isna().sum()
-    == ct_bldg_codes_missing_from_ac_data
-)
-
-# ---------------------------------------------------------------------------
-# Join ventilation data
-# ---------------------------------------------------------------------------
-missing_ventilation_summary = pd.read_csv(
-    "data/processed_data/missing_ventilation_summary.csv"
-)
-
-ct_bldg_codes_missing_from_vent_data = (
-    master_schools["Bldg_Code"].nunique()
-    - missing_ventilation_summary["BuildingCode"].nunique()
-)
-
-master_schools = master_schools.merge(
-    missing_ventilation_summary,
-    left_on="Bldg_Code",
-    right_on="BuildingCode",
-    how="left",
-).drop(columns=["BuildingCode"])
-
-assert (
-    master_schools.drop_duplicates(subset=["Bldg_Code"])["CLS_No_VT"].isna().sum()
-    == ct_bldg_codes_missing_from_vent_data
-)
-
-# ---------------------------------------------------------------------------
-# Join building capacity + utilization
-# ---------------------------------------------------------------------------
-bldg_capacity_utilization = pd.read_csv(
-    "data/processed_data/bldg_capacity_utilization.csv"
-)
-bldg_capacity_utilization.rename(
-    columns={
-        "Bldg ID": "Bldg_Code",
-        "Bldg Enroll": "Bldg_Enroll",
-        "Target Bldg Cap": "Bldg_Cap",
-        "Target Bldg Util": "Bldg_Util",
-        "Data As Of": "Util_As_Of",
-    },
-    inplace=True,
-)
-bldg_capacity_utilization["Util_As_Of"] = pd.to_datetime(
-    bldg_capacity_utilization["Util_As_Of"], format="%Y-%m-%d"
-)
-
-master_schools = master_schools.merge(
-    bldg_capacity_utilization[
-        ["Bldg_Code", "Bldg_Enroll", "Bldg_Cap", "Bldg_Util", "Util_As_Of"]
-    ],
-    on="Bldg_Code",
-    how="left",
-)
-
-# ---------------------------------------------------------------------------
-# Join BAP (Building Accessibility Profile)
-# ---------------------------------------------------------------------------
-# TODO: there's 1 single school with "No Information Available" for the description.
-# Remove that and make it null
-# TODO: fill nulls with "No Data" so that the Esri dashboard category filter can deal
-# with the nulls appropriately
-bap = pd.read_csv("data/processed_data/bap_with_school_codes.csv")
-bap.drop(columns=["Location Code"], inplace=True)
-bap.drop_duplicates(subset=["Building Code"], inplace=True)
-
-# TODO: undo all the 10-char column names and export as GPKG
-master_schools = master_schools.merge(
-    bap, left_on="Bldg_Code", right_on="Building Code", how="left"
-).drop(columns=["Building Code"])
-
-# ---------------------------------------------------------------------------
-# Join IBO School Barriers data
-# ---------------------------------------------------------------------------
-# NOTE: IBO only included schools that appeared in all their source datasets
-# (effectively an inner join). Going to primary sources may yield better coverage.
-# TODO: go back and get the original sources of all the data in IBO dataset to see if
-# we can get better coverage.
-ibo_barriers = pd.read_excel(
-    "data/raw_data/IBO/IBO-barriers-to-learning-data-file.xlsx", sheet_name="DATA"
-)
-print(
-    "Pct match from IBO to master_schools:",
-    ibo_barriers["building_code"].isin(master_schools["Bldg_Code"]).sum()
-    / len(ibo_barriers),
-)
-
-ibo_barriers["central_ac"] = ibo_barriers["central_ac"].map({"Y": 1, "N": 0})
-
-ibo_barriers = ibo_barriers[
-    ["building_code", "building_ownership_description", "yearbuilt", "age"]
-]
-
-master_schools = master_schools.merge(
-    ibo_barriers, left_on="Bldg_Code", right_on="building_code", how="left"
-).drop(columns=["building_code"])
-
-# ---------------------------------------------------------------------------
-# Join solar-readiness data
-# ---------------------------------------------------------------------------
-solar_readiness = pd.read_parquet(
-    "data/processed_data/solar_readiness_assessment_doe_buildings_2024.parquet"
-)
-solar_readiness.rename(
-    columns={
-        "Site": "Solar_Site",
-        "Status": "Solar_Status",
-        "Year of Report": "Solar_Year_of_Report",
-    },
-    inplace=True,
-)
-
-master_schools = master_schools.merge(
-    solar_readiness, left_on="Bldg_Code", right_on="Solar_Site", how="left"
-)
-
-# ---------------------------------------------------------------------------
-# Join city council districts
-# ---------------------------------------------------------------------------
-council_districts = gpd.read_file(
-    "data/processed_data/city_council_districts.geojson"
-).to_crs(master_schools.crs)
-master_schools = gpd.sjoin(
-    master_schools, council_districts, how="left", predicate="within"
-).drop(columns=["index_right", "BOROUGH", "Shape_Leng", "Shape_Area"])
-
-# ---------------------------------------------------------------------------
-# Join school districts
-# ---------------------------------------------------------------------------
-school_districts = gpd.read_file(
-    "data/raw_data/NYC Planning/School Districts/nysd_26a/nysd.shp"
-).to_crs(master_schools.crs)
-school_districts.drop(columns=["Shape_Leng", "Shape_Area"], inplace=True)
-
-master_schools = master_schools.sjoin(school_districts).drop(columns=["index_right"])
-
-# ---------------------------------------------------------------------------
-# Join LL84 energy data
-# ---------------------------------------------------------------------------
-ll84 = gpd.read_file("data/processed_data/ll84.geojson")
-master_schools = master_schools.merge(
-    ll84,
-    left_on=["Bldg_Code", "Loc_Code"],
-    right_on=["Building Code", "Location Code"],
-    how="left",
-    suffixes=("", "_right"),
-).drop(columns=["Location Code", "Building Code", "geometry_right"])
-
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
-master_schools.fillna(value=pd.NA, inplace=True)
-
-shortened_cols = {
+SHORTENED_COLS = {
     # DAC columns
     "dac_designation": "in_dac",
     "combined_score": "comb_score",
@@ -312,25 +91,271 @@ shortened_cols = {
     "Other Sustainability Projects": "Sol_Ot_Prj",
 }
 
-for col in master_schools.rename(columns=shortened_cols).columns:
-    if len(col) > 10:
-        print(f"{col} too long: currently {len(col)} chars")
+# Columns produced internally that are not part of the ArcGIS schema.
+# Dropped before export.
+_INTERNAL_COLS = ["BoroName"]
 
-master_schools = master_schools.rename(columns=shortened_cols)
 
-shp_path = "data/processed_data/master_schools.shp"
-master_schools.sort_values("Loc_Code").to_file(shp_path, driver="ESRI Shapefile")
+# ---------------------------------------------------------------------------
+# Geometry fix
+# ---------------------------------------------------------------------------
 
-zip_path = "data/processed_data/master_schools.zip"
-base_name = "data/processed_data/master_schools"
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-    for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
-        file_path = base_name + ext
-        if os.path.exists(file_path):
-            zipf.write(file_path, os.path.basename(file_path))
-            print(f"Added {os.path.basename(file_path)} to zip")
-print(f"Shapefile saved as zip: {zip_path}")
 
-master_schools.sort_values("Loc_Code").to_file(
-    "data/processed_data/master_schools.geojson", driver="GeoJSON"
-)
+def snap_schools_by_building_code(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Align schools that share a building to a shared centroid.
+
+    Multiple schools in the same building can have slightly different point
+    locations. Groups by Bldg_Code, replaces each group's geometries with the
+    centroid of the group, and updates lat/lng to match.
+    """
+    crs = schools.crs
+    centroid_by_bldg = (
+        schools.groupby("Bldg_Code")["geometry"]
+        .apply(lambda g: g.union_all().centroid)
+        .rename("snapped_geom")
+    )
+    result = schools.join(centroid_by_bldg, on="Bldg_Code")
+    result["lat"] = result["snapped_geom"].y
+    result["lng"] = result["snapped_geom"].x
+    return (
+        result.set_geometry("snapped_geom", crs=crs)
+        .drop(columns=["geometry"])
+        .rename_geometry("geometry")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Join functions
+# ---------------------------------------------------------------------------
+
+
+def join_boroughs(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    boroughs = gpd.read_file("data/raw_data/NYC Planning/Boroughs/nybb_25c/nybb.shp")[
+        ["BoroName", "geometry"]
+    ].to_crs(schools.crs)
+    return gpd.sjoin(schools, boroughs, how="left", predicate="within").drop(
+        columns=["index_right"]
+    )
+
+
+def join_dacs(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    dacs = gpd.read_file("data/processed_data/dac_nyc_lite.geojson")
+    dac_union = dacs.union_all()
+    assert (
+        schools.geometry.apply(dac_union.covers).sum()
+        == schools.geometry.within(dac_union).sum()
+    ), "Some schools sit exactly on a DAC border — check geometry validity"
+    result = gpd.sjoin(schools, dacs, how="left", predicate="within").drop(
+        columns=["index_right", "county", "geoid"]
+    )
+    result["dac_designation"] = result["dac_designation"].fillna(False)
+    return result
+
+
+def join_election_results(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    primary_results = gpd.read_file(
+        "data/processed_data/zohran_first_round_frac.geojson"
+    )
+    og_crs = schools.crs
+    schools_proj = schools.to_crs("EPSG:3857")
+    results_proj = primary_results.to_crs("EPSG:3857")
+
+    joined = gpd.sjoin(schools_proj, results_proj, how="left", predicate="within").drop(
+        columns=["index_right"]
+    )
+
+    unmatched = joined["ZohranFirstRoundFrac"].isna()
+    print(
+        f"Found {unmatched.sum()} schools without polygon matches, "
+        "using nearest neighbor..."
+    )
+    nearest = gpd.tools.sjoin_nearest(
+        joined[unmatched].drop(columns="ZohranFirstRoundFrac"),
+        results_proj,
+        how="left",
+    )
+    joined.loc[unmatched, "ZohranFirstRoundFrac"] = nearest[
+        "ZohranFirstRoundFrac"
+    ].values
+
+    assert not joined["ZohranFirstRoundFrac"].isna().any()
+    return joined.to_crs(og_crs)
+
+
+def join_ac(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    no_ac = pd.read_csv("data/processed_data/no_ac_summary.csv")
+    ct_missing = schools["Bldg_Code"].nunique() - no_ac["BuildingCode"].nunique()
+    result = schools.merge(
+        no_ac, left_on="Bldg_Code", right_on="BuildingCode", how="left"
+    ).drop(columns=["BuildingCode"])
+    assert (
+        result.drop_duplicates(subset=["Bldg_Code"])["CLS_No_AC"].isna().sum()
+        == ct_missing
+    )
+    return result
+
+
+def join_ventilation(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    vent = pd.read_csv("data/processed_data/missing_ventilation_summary.csv")
+    ct_missing = schools["Bldg_Code"].nunique() - vent["BuildingCode"].nunique()
+    result = schools.merge(
+        vent, left_on="Bldg_Code", right_on="BuildingCode", how="left"
+    ).drop(columns=["BuildingCode"])
+    assert (
+        result.drop_duplicates(subset=["Bldg_Code"])["CLS_No_VT"].isna().sum()
+        == ct_missing
+    )
+    return result
+
+
+def join_capacity_utilization(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    cap = pd.read_csv("data/processed_data/bldg_capacity_utilization.csv")
+    cap.rename(
+        columns={
+            "Bldg ID": "Bldg_Code",
+            "Bldg Enroll": "Bldg_Enroll",
+            "Target Bldg Cap": "Bldg_Cap",
+            "Target Bldg Util": "Bldg_Util",
+            "Data As Of": "Util_As_Of",
+        },
+        inplace=True,
+    )
+    cap["Util_As_Of"] = pd.to_datetime(cap["Util_As_Of"], format="%Y-%m-%d")
+    return schools.merge(
+        cap[["Bldg_Code", "Bldg_Enroll", "Bldg_Cap", "Bldg_Util", "Util_As_Of"]],
+        on="Bldg_Code",
+        how="left",
+    )
+
+
+def join_bap(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    # TODO: 1 school has "No Information Available" — remove and make null
+    # TODO: fill nulls with "No Data" for Esri dashboard category filter
+    bap = pd.read_csv("data/processed_data/bap_with_school_codes.csv")
+    bap.drop(columns=["Location Code"], inplace=True)
+    bap.drop_duplicates(subset=["Building Code"], inplace=True)
+    return schools.merge(
+        bap, left_on="Bldg_Code", right_on="Building Code", how="left"
+    ).drop(columns=["Building Code"])
+
+
+def join_ibo(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    # NOTE: IBO only included schools appearing in all their source datasets
+    # (effectively an inner join). Going to primary sources may yield better coverage.
+    # TODO: go back and get the original sources of all the data in IBO dataset
+    ibo = pd.read_excel(
+        "data/raw_data/IBO/IBO-barriers-to-learning-data-file.xlsx", sheet_name="DATA"
+    )
+    print(
+        "Pct match from IBO to master_schools:",
+        ibo["building_code"].isin(schools["Bldg_Code"]).sum() / len(ibo),
+    )
+    ibo["central_ac"] = ibo["central_ac"].map({"Y": 1, "N": 0})
+    ibo = ibo[["building_code", "building_ownership_description", "yearbuilt", "age"]]
+    return schools.merge(
+        ibo, left_on="Bldg_Code", right_on="building_code", how="left"
+    ).drop(columns=["building_code"])
+
+
+def join_solar(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    solar = pd.read_parquet(
+        "data/processed_data/solar_readiness_assessment_doe_buildings_2024.parquet"
+    )
+    solar.rename(
+        columns={
+            "Site": "Solar_Site",
+            "Status": "Solar_Status",
+            "Year of Report": "Solar_Year_of_Report",
+        },
+        inplace=True,
+    )
+    return schools.merge(solar, left_on="Bldg_Code", right_on="Solar_Site", how="left")
+
+
+def join_council_districts(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    council = gpd.read_file(
+        "data/processed_data/city_council_districts.geojson"
+    ).to_crs(schools.crs)
+    return gpd.sjoin(schools, council, how="left", predicate="within").drop(
+        columns=["index_right", "BOROUGH", "Shape_Leng", "Shape_Area"]
+    )
+
+
+def join_school_districts(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    districts = gpd.read_file(
+        "data/raw_data/NYC Planning/School Districts/nysd_26a/nysd.shp"
+    ).to_crs(schools.crs)
+    districts.drop(columns=["Shape_Leng", "Shape_Area"], inplace=True)
+    return schools.sjoin(districts).drop(columns=["index_right"])
+
+
+def join_ll84(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    ll84 = gpd.read_file("data/processed_data/ll84.geojson")
+    return schools.merge(
+        ll84,
+        left_on=["Bldg_Code", "Loc_Code"],
+        right_on=["Building Code", "Location Code"],
+        how="left",
+        suffixes=("", "_right"),
+    ).drop(columns=["Location Code", "Building Code", "geometry_right"])
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+
+def build_master_schools(
+    schools_path: str = "data/processed_data/school_points_with_lcgms.shp",
+) -> gpd.GeoDataFrame:
+    schools = gpd.read_file(schools_path)
+    schools = snap_schools_by_building_code(schools)
+    master = join_boroughs(schools)
+    master = join_dacs(master)
+    master = join_election_results(master)
+    master = join_ac(master)
+    master = join_ventilation(master)
+    master = join_capacity_utilization(master)
+    master = join_bap(master)
+    master = join_ibo(master)
+    master = join_solar(master)
+    master = join_council_districts(master)
+    master = join_school_districts(master)
+    master = join_ll84(master)
+
+    master = master.fillna(value=pd.NA)
+    master = master.drop(columns=[c for c in _INTERNAL_COLS if c in master.columns])
+    master = master.rename(columns=SHORTENED_COLS)
+
+    for col in master.columns:
+        if len(col) > 10:
+            print(f"WARNING: column name too long for shapefile export: {col!r}")
+
+    return master
+
+
+def export(master: gpd.GeoDataFrame) -> None:
+    master = master.sort_values("Loc_Code")
+
+    shp_path = "data/processed_data/master_schools.shp"
+    master.to_file(shp_path, driver="ESRI Shapefile")
+
+    zip_path = "data/processed_data/master_schools.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+            fp = "data/processed_data/master_schools" + ext
+            if os.path.exists(fp):
+                zf.write(fp, os.path.basename(fp))
+                print(f"Added {os.path.basename(fp)} to zip")
+    print(f"Shapefile saved as zip: {zip_path}")
+
+    master.to_file("data/processed_data/master_schools.geojson", driver="GeoJSON")
+
+
+def main() -> None:
+    master = build_master_schools()
+    export(master)
+
+
+if __name__ == "__main__":
+    main()
