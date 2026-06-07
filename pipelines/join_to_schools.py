@@ -97,6 +97,44 @@ _INTERNAL_COLS = ["BoroName"]
 
 
 # ---------------------------------------------------------------------------
+# DQ assertion helper
+# ---------------------------------------------------------------------------
+
+
+def check_join(
+    before: gpd.GeoDataFrame,
+    after: gpd.GeoDataFrame,
+    join_name: str,
+    *,
+    null_sentinel_cols: list[str],
+    match_col: str | None = None,
+    min_match_rate: float | None = None,
+) -> None:
+    """Assert join quality invariants; raise AssertionError on failure."""
+    assert len(after) == len(
+        before
+    ), f"{join_name}: row count changed {len(before)} → {len(after)}"
+    for col in null_sentinel_cols:
+        before_nulls = int(before[col].isna().sum())
+        after_nulls = int(after[col].isna().sum())
+        assert after_nulls <= before_nulls, (
+            f"{join_name}: null count increased in {col!r}: "
+            f"{before_nulls} → {after_nulls}"
+        )
+    if "Loc_Code" in after.columns:
+        dupes = int(after["Loc_Code"].duplicated().sum())
+        assert dupes == 0, f"{join_name}: {dupes} duplicate Loc_Code values after join"
+    if match_col is not None:
+        rate = after[match_col].notna().mean()
+        print(f"{join_name}: match rate on {match_col!r} = {rate:.1%}")
+        if min_match_rate is not None:
+            assert rate >= min_match_rate, (
+                f"{join_name}: match rate {rate:.1%} below threshold "
+                f"{min_match_rate:.1%} on {match_col!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Geometry fix
 # ---------------------------------------------------------------------------
 
@@ -133,9 +171,19 @@ def join_boroughs(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     boroughs = gpd.read_file("data/raw_data/NYC Planning/Boroughs/nybb_25c/nybb.shp")[
         ["BoroName", "geometry"]
     ].to_crs(schools.crs)
-    return gpd.sjoin(schools, boroughs, how="left", predicate="within").drop(
+    result = gpd.sjoin(schools, boroughs, how="left", predicate="within").drop(
         columns=["index_right"]
     )
+    check_join(
+        schools,
+        result,
+        "boroughs",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="BoroName",
+        # 0.99 — every NYC school should fall within a borough polygon
+        min_match_rate=0.99,
+    )
+    return result
 
 
 def join_dacs(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -149,6 +197,13 @@ def join_dacs(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         columns=["index_right", "county", "geoid"]
     )
     result["dac_designation"] = result["dac_designation"].fillna(False)
+    check_join(
+        schools,
+        result,
+        "DACs",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        # dac_designation filled False for non-DAC schools; no match threshold needed
+    )
     return result
 
 
@@ -178,32 +233,49 @@ def join_election_results(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         "ZohranFirstRoundFrac"
     ].values
 
-    assert not joined["ZohranFirstRoundFrac"].isna().any()
-    return joined.to_crs(og_crs)
+    result = joined.to_crs(og_crs)
+    check_join(
+        schools,
+        result,
+        "election results",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="ZohranFirstRoundFrac",
+        # 1.0 — nearest neighbor fallback ensures every school gets a result
+        min_match_rate=1.0,
+    )
+    return result
 
 
 def join_ac(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     no_ac = pd.read_csv("data/processed_data/no_ac_summary.csv")
-    ct_missing = schools["Bldg_Code"].nunique() - no_ac["BuildingCode"].nunique()
     result = schools.merge(
         no_ac, left_on="Bldg_Code", right_on="BuildingCode", how="left"
     ).drop(columns=["BuildingCode"])
-    assert (
-        result.drop_duplicates(subset=["Bldg_Code"])["CLS_No_AC"].isna().sum()
-        == ct_missing
+    check_join(
+        schools,
+        result,
+        "A/C",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="CLS_No_AC",
+        # 0.85 — scraped from nycenet.edu; not all buildings appear (actual ~89%)
+        min_match_rate=0.85,
     )
     return result
 
 
 def join_ventilation(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     vent = pd.read_csv("data/processed_data/missing_ventilation_summary.csv")
-    ct_missing = schools["Bldg_Code"].nunique() - vent["BuildingCode"].nunique()
     result = schools.merge(
         vent, left_on="Bldg_Code", right_on="BuildingCode", how="left"
     ).drop(columns=["BuildingCode"])
-    assert (
-        result.drop_duplicates(subset=["Bldg_Code"])["CLS_No_VT"].isna().sum()
-        == ct_missing
+    check_join(
+        schools,
+        result,
+        "ventilation",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="CLS_No_VT",
+        # 0.85 — scraped from nycenet.edu; not all buildings appear (actual ~89%)
+        min_match_rate=0.85,
     )
     return result
 
@@ -221,11 +293,21 @@ def join_capacity_utilization(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         inplace=True,
     )
     cap["Util_As_Of"] = pd.to_datetime(cap["Util_As_Of"], format="%Y-%m-%d")
-    return schools.merge(
+    result = schools.merge(
         cap[["Bldg_Code", "Bldg_Enroll", "Bldg_Cap", "Bldg_Util", "Util_As_Of"]],
         on="Bldg_Code",
         how="left",
     )
+    check_join(
+        schools,
+        result,
+        "capacity utilization",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="Bldg_Cap",
+        # 0.80 — SCA data doesn't cover all buildings (leased, charters); actual ~87%
+        min_match_rate=0.80,
+    )
+    return result
 
 
 def join_bap(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -234,9 +316,19 @@ def join_bap(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     bap = pd.read_csv("data/processed_data/bap_with_school_codes.csv")
     bap.drop(columns=["Location Code"], inplace=True)
     bap.drop_duplicates(subset=["Building Code"], inplace=True)
-    return schools.merge(
+    result = schools.merge(
         bap, left_on="Bldg_Code", right_on="Building Code", how="left"
     ).drop(columns=["Building Code"])
+    check_join(
+        schools,
+        result,
+        "BAP",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="BAP Rating",
+        # 0.95 — full coverage expected (actual 100%); floor catches data loss
+        min_match_rate=0.95,
+    )
+    return result
 
 
 def join_ibo(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -252,9 +344,19 @@ def join_ibo(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     )
     ibo["central_ac"] = ibo["central_ac"].map({"Y": 1, "N": 0})
     ibo = ibo[["building_code", "building_ownership_description", "yearbuilt", "age"]]
-    return schools.merge(
+    result = schools.merge(
         ibo, left_on="Bldg_Code", right_on="building_code", how="left"
     ).drop(columns=["building_code"])
+    check_join(
+        schools,
+        result,
+        "IBO",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="age",
+        # 0.80 — IBO is an inner join of multiple source datasets; actual ~86%
+        min_match_rate=0.80,
+    )
+    return result
 
 
 def join_solar(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -269,16 +371,38 @@ def join_solar(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         },
         inplace=True,
     )
-    return schools.merge(solar, left_on="Bldg_Code", right_on="Solar_Site", how="left")
+    result = schools.merge(
+        solar, left_on="Bldg_Code", right_on="Solar_Site", how="left"
+    )
+    check_join(
+        schools,
+        result,
+        "solar",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="Solar_Status",
+        # 0.80 — hand-extracted from LL24 PDF; not all buildings in report (actual ~86%)
+        min_match_rate=0.80,
+    )
+    return result
 
 
 def join_council_districts(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     council = gpd.read_file(
         "data/processed_data/city_council_districts.geojson"
     ).to_crs(schools.crs)
-    return gpd.sjoin(schools, council, how="left", predicate="within").drop(
+    result = gpd.sjoin(schools, council, how="left", predicate="within").drop(
         columns=["index_right", "BOROUGH", "Shape_Leng", "Shape_Area"]
     )
+    check_join(
+        schools,
+        result,
+        "council districts",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="NAME",
+        # 0.99 — spatial join; 100% actual coverage; floor catches CRS or data issues
+        min_match_rate=0.99,
+    )
+    return result
 
 
 def join_school_districts(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -286,18 +410,38 @@ def join_school_districts(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         "data/raw_data/NYC Planning/School Districts/nysd_26a/nysd.shp"
     ).to_crs(schools.crs)
     districts.drop(columns=["Shape_Leng", "Shape_Area"], inplace=True)
-    return schools.sjoin(districts).drop(columns=["index_right"])
+    result = schools.sjoin(districts, how="left").drop(columns=["index_right"])
+    check_join(
+        schools,
+        result,
+        "school districts",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="SchoolDist",
+        # 0.99 — every school should fall within a school district polygon
+        min_match_rate=0.99,
+    )
+    return result
 
 
 def join_ll84(schools: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     ll84 = gpd.read_file("data/processed_data/ll84.geojson")
-    return schools.merge(
+    result = schools.merge(
         ll84,
         left_on=["Bldg_Code", "Loc_Code"],
         right_on=["Building Code", "Location Code"],
         how="left",
         suffixes=("", "_right"),
     ).drop(columns=["Location Code", "Building Code", "geometry_right"])
+    check_join(
+        schools,
+        result,
+        "LL84",
+        null_sentinel_cols=["Loc_Code", "Bldg_Code"],
+        match_col="ENERGY STAR Score",
+        # 0.85 — not all buildings qualify for Energy Star Score (actual ~91%)
+        min_match_rate=0.85,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
