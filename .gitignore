@@ -4,6 +4,10 @@ data/
 # macOS
 .DS_Store
 
+# Editor / local tool config
+.vscode/
+.compound-engineering/config.local.yaml
+
 ### Python ###
 # Byte-compiled / optimized / DLL files
 __pycache__/
