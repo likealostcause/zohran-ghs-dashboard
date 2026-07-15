@@ -25,6 +25,7 @@ dev = [
     "jupyter>=1.1.1",
     "pre-commit>=3.5.0",
     "pytest>=7.4.0",
+    "ruff==0.1.7",
 ]
 
 [tool.project.external-dependencies]
@@ -44,7 +45,7 @@ packages = ["src/zohran_ghs_dashboard"]
 [tool.ruff]
 line-length = 88
 target-version = "py39"
-extend-exclude = ["*.ipynb"]
+extend-exclude = ["*.ipynb", "apps", "src", "notebooks/andre_working"]
 
 [tool.ruff.lint]
 select = [
